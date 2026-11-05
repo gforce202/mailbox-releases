@@ -1,0 +1,44 @@
+# Publishes a MailBox version as a GitHub Release.
+# A version is uploaded to a branch named upload/<version> holding the installer split into
+# parts under 100 MB (MailBox-Setup-<version>.exe.part-*), its .blockmap, latest.yml and
+# notes.md. This joins the parts, checks them against latest.yml, publishes the Release and
+# deletes the branch.
+name: Publish release
+on:
+  push:
+    branches: ['upload/**']
+permissions:
+  contents: write
+concurrency: publish
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Join and check the installer
+        id: join
+        run: |
+          set -euo pipefail
+          ver="${GITHUB_REF_NAME#upload/}"
+          exe="MailBox-Setup-${ver}.exe"
+          cat $(ls "${exe}".part-* | sort) > "$exe"
+          want=$(grep -m1 '^sha512:' latest.yml | awk '{print $2}')
+          got=$(openssl dgst -sha512 -binary "$exe" | base64 -w0)
+          [ "$want" = "$got" ] || { echo "Installer doesn't match latest.yml"; exit 1; }
+          grep -q "^version: ${ver}$" latest.yml || { echo "latest.yml is for another version"; exit 1; }
+          echo "ver=$ver" >> "$GITHUB_OUTPUT"
+          echo "exe=$exe" >> "$GITHUB_OUTPUT"
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ver="${{ steps.join.outputs.ver }}"; exe="${{ steps.join.outputs.exe }}"
+          gh release delete "v$ver" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "v$ver" "$exe" "$exe.blockmap" latest.yml \
+            --target main --title "MailBox $ver" --notes-file notes.md --latest
+      - name: Remove the upload branch
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: git push origin --delete "$GITHUB_REF_NAME"
